@@ -30,6 +30,92 @@ BUILDER_NAMES = {
     "sama2": ("Sam Altman", "OpenAI CEO"),
 }
 
+# ===== 质量评分函数 =====
+QUALITY_SIGNALS = [
+    # 具体观点/分析
+    "because", "means", "suggests", "reveals", "proves", "demonstrates",
+    "insight", "pattern", "trend", "mistake", "wrong", "actually",
+    "the key", "the problem", "the issue", "the reason", "the truth",
+    "realize", "learned", "figured out", "discovered",
+    # 数据/数字
+    "x ", "%", "billion", "million", "$", "10x", "100x",
+    # 方法论
+    "instead of", "rather than", "focus on", "the right way",
+    "stop", "start", "do this", "don't do", "rule", "principle",
+    # 具体实体
+    "we built", "we launched", "we shipped", "we made",
+    "just released", "just launched", "open sourced",
+    "introducing", "announcing", "launching",
+]
+
+LOW_SIGNALS = [
+    # 纯情绪
+    "haha", "lol", "lmao", "笑死", "笑到", "太牛", "太强", "绝了",
+    "love this", "love it", "so cool", "so funny", "so good",
+    "proud", "congrats", "congratulations", "amazing",
+    # 纯日常
+    "good morning", "good night", "gm ", "gn ", "晚安", "早安",
+    "had a", "great meal", "lunch", "dinner", "coffee",
+    # 纯转发
+    "retweet", "rt @", "shared", "via ",
+    # 纯 promo/announcement
+    "link in bio", "subscribe", "check out my", "new video",
+    "new post", "just dropped", "episode", "podcast",
+    # 太短无信息量
+    "yes", "no ", "ok ", "sure", "wow", "wtf", "omg",
+    # 纯符号/无实质
+    "🪄", "🦞", "🦀", "⬆️", "✅", "👏", "😂", "🎉",
+]
+
+
+def score_quality(text):
+    """
+    给一条推文打内容质量分（0~100）。
+    - 60 分以上：有实质内容，可加入观点速览
+    - 80 分以上：高质量，进入最值得看候选
+    """
+    t = text.strip()
+    score = 50  # 基准分
+
+    # 长度奖励（去掉链接后）
+    clean_len = len(re.sub(r"https?://\S+", "", t).strip())
+    if clean_len >= 200:
+        score += 20
+    elif clean_len >= 120:
+        score += 10
+    elif clean_len < 40:
+        return 0  # 太短直接淘汰
+
+    t_lower = t.lower()
+
+    # 加分信号
+    for sig in QUALITY_SIGNALS:
+        if sig.lower() in t_lower:
+            score += 8
+
+    # 扣分信号
+    for sig in LOW_SIGNALS:
+        if sig.lower() in t_lower:
+            score -= 25
+
+    # 检查是否几乎全是符号/emoji（无实质文字）
+    alpha_ratio = sum(1 for c in t if c.isalpha()) / max(len(t), 1)
+    if alpha_ratio < 0.3:
+        score -= 40
+
+    return max(0, min(100, score))
+
+
+def is_substantive(text):
+    """判断是否值得加入摘要（有实质内容，不只是日常闲聊）。"""
+    return score_quality(text) >= 60
+
+
+def is_top_quality(text):
+    """判断是否值得进入「最值得看」板块（最高质量）。"""
+    return score_quality(text) >= 80
+
+
 # ===== 工具函数 =====
 def translate(text, src="en", dst="zh-CN", retries=2):
     """调用 MyMemory 免费翻译 API，将 text 从 src 译为 dst。"""
@@ -157,14 +243,6 @@ def build_digest(feed, translations):
     today = datetime.now().strftime("%Y-%m-%d")
     builders = feed.get("x", [])
 
-    # 过滤关键词
-    BULLSHIT_KEYWORDS = [
-        "thanks for", "thank you", "congrats", "congratulations", "excited to",
-        "proud to", "happy to", "love this", "great to see", "check out my",
-        "link in bio", "subscribe", "podcast", "episode", "just dropped",
-        "🪄", "🦞", "🦀", "⬆️", "✅", "🔥", "👏", "😂",
-    ]
-
     top_items = []
     view_items = []
 
@@ -180,24 +258,19 @@ def build_digest(feed, translations):
 
         for tw in tweets:
             text = tw.get("text", "")
-            url = tw.get("url", "")
+            clean_text = re.sub(r"https?://\S+", "", text).strip()
             likes = tw.get("likes", 0)
             rt = tw.get("retweets", 0)
 
-            if len(text) < 40:
-                continue
-            if any(kw.lower() in text.lower() for kw in BULLSHIT_KEYWORDS):
+            # 用质量评分判断是否值得收录
+            if not is_substantive(clean_text):
                 continue
 
-            is_top = (likes >= 20 or rt >= 5) and len(text) >= 80
-
-            # 去链接 + 翻译
-            clean_text = re.sub(r"https?://\S+", "", text).strip()
             zh_text = translations.get(clean_text, translations.get(text, clean_text))
-
-            # 去掉了 → note 价值判断行
             entry = f"- {name}（{role}）：{zh_text}"
 
+            # 最值得看：高质量（>=80分）或高互动（likes>=20 or rt>=5）
+            is_top = is_top_quality(clean_text) or (likes >= 20 or rt >= 5)
             if is_top and len(top_items) < 3:
                 top_items.append("▶ " + entry)
             elif len(view_items) < 8:
@@ -245,24 +318,18 @@ def main():
     builders_data = feed.get("x", [])
     print(f"   → {len(builders_data)} 位 Builders")
 
-    # 收集所有待翻译的推文
-    print("🌏 收集推文文本...")
+    # 收集所有待翻译的推文（质量评分 >= 60 才收录）
+    print("🌏 收集推文文本（质量评分 >= 60）...")
     all_texts = []
     text_to_builder = {}
-    BULLSHIT_KEYWORDS = [
-        "thanks for", "thank you", "congrats", "congratulations", "excited to",
-        "proud to", "happy to", "love this", "great to see", "check out my",
-        "link in bio", "subscribe", "podcast", "episode", "just dropped",
-        "🪄", "🦞", "🦀", "⬆️", "✅", "🔥", "👏", "😂",
-    ]
     for b in builders_data:
         for tw in b.get("tweets", []):
             t_raw = tw.get("text", "")
             t = re.sub(r"https?://\S+", "", t_raw).strip()
-            if len(t) >= 40 and not any(kw.lower() in t.lower() for kw in BULLSHIT_KEYWORDS):
-                if t not in text_to_builder:
-                    text_to_builder[t] = True
-                    all_texts.append(t)
+            # 质量评分过滤
+            if is_substantive(t) and t not in text_to_builder:
+                text_to_builder[t] = True
+                all_texts.append(t)
     print(f"   → {len(all_texts)} 条推文待翻译")
 
     print("✍️  翻译推文...")
