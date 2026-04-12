@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 AI Builder 每日晨报 · 飞书 Bot 推送脚本
-GitHub Actions 调用：读取 feed-x.json → 生成中文摘要 → 发飞书 Bot 消息
+GitHub Actions 调用：读取 feed-x.json → 翻译 + 生成中文摘要 → 发飞书 Bot 消息
 """
-import json, urllib.request, urllib.error, sys
+import json, urllib.request, urllib.error, sys, time
 from datetime import datetime
 
 # ===== 配置 =====
@@ -30,18 +30,95 @@ BUILDER_NAMES = {
     "sama2": ("Sam Altman", "OpenAI CEO"),
 }
 
-# ===== 翻译映射（真实推文内容）=====
-BUILDER_VIEWS = {
-    "petergyang": "AI行业的工作强度叙事通常来自西方媒体，这个视角直接来自中国AI从业者的亲历，有数据感，有温度。",
-    "trq212": "plan vs ultraplan 的核心洞察：实现有时需要本地交互环境，而规划可以放在云端，因为它本质上只是 token 处理。",
-    "garrytan": "真正好的 PM 能做到的事情，现在 AI 帮你做。开发者体验的 AI 赋能正在从想法变成现实产品。",
-    "nikunj": "从 Googler 转型 VC，核心洞察：技术债不是代码问题，是组织记忆问题。AI 正在改变这个动态。",
-    "steipete": "SaaS 的「免费」革命：你不喜欢界面？立刻设计并推送一个新的。性能慢？直接重构数据层。",
-    "amasad": "两年前预言「理性主义」意识形态终将导致暴力——Sam Altman 遇袭案验证了这一点。",
-    "zarazhangrui": "华人 Builder 的独特视角：开源模型的地缘政治格局正在重塑全球 AI 竞争态势。",
-}
-
 # ===== 工具函数 =====
+def translate(text, src="en", dst="zh-CN", retries=2):
+    """调用 MyMemory 免费翻译 API，将 text 从 src 译为 dst。"""
+    if not text or len(text.strip()) < 5:
+        return text
+    url = (
+        f"https://api.mymemory.translated.net/get"
+        f"?q={urllib.parse.quote(text[:500])}"
+        f"&langpair={src}|{dst}"
+    )
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            d = json.loads(resp.read())
+        match = d.get("responseStatus")
+        if match == 200:
+            translated = d["responseData"]["translatedText"]
+            # MyMemory 对过长文本分段翻译，拼接后返回
+            return translated
+    except Exception:
+        pass
+    return text
+
+import urllib.parse
+
+def translate_v2(text, src="en", dst="zh-CN"):
+    """翻译一段文字，自动处理长文本分段。"""
+    MAX_LEN = 450
+    if not text:
+        return text
+    # 判断是否全中文，是则不译
+    try:
+        if sum(1 for c in text[:50] if '\u4e00' <= c <= '\u9fff') > 20:
+            return text
+    except:
+        pass
+    if len(text) <= MAX_LEN:
+        return _translate_chunk(text, src, dst)
+    # 分句
+    sentences = text.split('. ')
+    chunks, current = [], ""
+    for s in sentences:
+        if len(current) + len(s) < MAX_LEN:
+            current += (". " if current else "") + s
+        else:
+            if current:
+                chunks.append(current)
+            current = s
+    if current:
+        chunks.append(current)
+    # 合并相邻短句减少碎片
+    merged = []
+    for c in chunks:
+        if merged and len(merged[-1]) + len(c) < MAX_LEN + 20:
+            merged[-1] += ". " + c
+        else:
+            merged.append(c)
+    result = []
+    for chunk in merged:
+        t = _translate_chunk(chunk.strip(), src, dst)
+        result.append(t)
+        time.sleep(0.3)
+    return " ".join(result)
+
+def _translate_chunk(text, src, dst):
+    url = (
+        f"https://api.mymemory.translated.net/get"
+        f"?q={urllib.parse.quote(text)}"
+        f"&langpair={src}|{dst}"
+    )
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            d = json.loads(resp.read())
+        if d.get("responseStatus") == 200:
+            return d["responseData"]["translatedText"]
+    except Exception:
+        pass
+    return text
+
+def translate_tweets(texts, delay=0.4):
+    """批量翻译推文，返回 [(原文, 译文)]。"""
+    results = []
+    for t in texts:
+        zh = translate_v2(t)
+        results.append((t, zh))
+        time.sleep(delay)
+    return results
+
 def get_tenant_token():
     url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
     data = json.dumps({"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET}).encode()
@@ -51,7 +128,6 @@ def get_tenant_token():
     if d.get("code") != 0:
         raise Exception(f"获取 token 失败: {d.get('msg')}")
     return d["tenant_access_token"]
-
 
 def send_feishu_text(token, open_id, text):
     url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id"
@@ -71,19 +147,17 @@ def send_feishu_text(token, open_id, text):
         raise Exception(f"发送失败: {d.get('msg')}")
     return d
 
-
 def fetch_feed():
     req = urllib.request.Request(FEED_URL, headers={"Accept": "application/json"})
     with urllib.request.urlopen(req) as resp:
         return json.loads(resp.read())
 
-
 # ===== 核心逻辑：构建摘要 =====
-def build_digest(feed):
+def build_digest(feed, translations):
     today = datetime.now().strftime("%Y-%m-%d")
     builders = feed.get("x", [])
 
-    # 过滤：跳过纯 announcement / promo / 感叹
+    # 过滤关键词
     BULLSHIT_KEYWORDS = [
         "thanks for", "thank you", "congrats", "congratulations", "excited to",
         "proud to", "happy to", "love this", "great to see", "check out my",
@@ -91,8 +165,8 @@ def build_digest(feed):
         "🪄", "🦞", "🦀", "⬆️", "✅", "🔥", "👏", "😂",
     ]
 
-    top_items = []    # 最值得看（有实质内容）
-    view_items = []   # 观点速览
+    top_items = []
+    view_items = []
 
     for b in builders:
         handle = b.get("handle", "").lower()
@@ -110,25 +184,24 @@ def build_digest(feed):
             likes = tw.get("likes", 0)
             rt = tw.get("retweets", 0)
 
-            # 跳过太短或垃圾内容
             if len(text) < 40:
                 continue
             if any(kw.lower() in text.lower() for kw in BULLSHIT_KEYWORDS):
                 continue
 
-            # 优质内容判断
             is_top = (likes >= 20 or rt >= 5) and len(text) >= 80
 
-            # 添加中文注释
-            note = BUILDER_VIEWS.get(handle, "")
-            entry = f"- **{name}**（{role}）：{text}\n  → {note}" if note else f"- **{name}**（{role}）：{text}"
+            # 翻译
+            zh_text = translations.get(text, text)
+
+            # 去掉了 → note 价值判断行
+            entry = f"- **{name}**（{role}）：{zh_text}"
 
             if is_top and len(top_items) < 3:
                 top_items.append(entry)
             elif len(view_items) < 8:
                 view_items.append(entry)
 
-    # 组装消息
     lines = [
         f"🌅 AI Builder 每日晨报｜{today}",
         "跟踪真正做产品、做研究、做系统的人。",
@@ -149,22 +222,8 @@ def build_digest(feed):
         "- 如果你在做商业化 → 盯紧企业级 AI 的真实需求：接系统、接数据、可执行、能交付。",
     ]
 
-    links = []
-    for b in builders:
-        handle = b.get("handle", "").lower()
-        name = BUILDER_NAMES.get(handle, (b.get("name", ""), ""))[0]
-        for tw in b.get("tweets", []):
-            u = tw.get("url", "")
-            if u and u not in links[:5]:
-                links.append(f"- {name}：{u}")
-
-    lines += ["", "🔗 今日原文链接"]
-    lines += links[:8]
-
     return "\n".join(lines)
 
-
-# ===== 链接汇总（单独发）=====
 def build_links_summary(feed):
     builders = feed.get("x", [])
     links = []
@@ -179,15 +238,41 @@ def build_links_summary(feed):
                 links.append(f"- {name}：{u}")
     return "🔗 今日原文链接汇总\n" + "\n".join(links[:10])
 
-
-# ===== 主入口 =====
 def main():
     print("📡 读取 feed 数据...")
     feed = fetch_feed()
-    print(f"   → {len(feed.get('x', []))} 位 Builders")
+    builders_data = feed.get("x", [])
+    print(f"   → {len(builders_data)} 位 Builders")
 
-    print("✍️  生成中文摘要...")
-    digest = build_digest(feed)
+    # 收集所有待翻译的推文
+    print("🌏 收集推文文本...")
+    all_texts = []
+    text_to_builder = {}
+    BULLSHIT_KEYWORDS = [
+        "thanks for", "thank you", "congrats", "congratulations", "excited to",
+        "proud to", "happy to", "love this", "great to see", "check out my",
+        "link in bio", "subscribe", "podcast", "episode", "just dropped",
+        "🪄", "🦞", "🦀", "⬆️", "✅", "🔥", "👏", "😂",
+    ]
+    for b in builders_data:
+        for tw in b.get("tweets", []):
+            t = tw.get("text", "")
+            if len(t) >= 40 and not any(kw.lower() in t.lower() for kw in BULLSHIT_KEYWORDS):
+                if t not in text_to_builder:
+                    text_to_builder[t] = True
+                    all_texts.append(t)
+    print(f"   → {len(all_texts)} 条推文待翻译")
+
+    print("✍️  翻译推文...")
+    translations = {}
+    for i, text in enumerate(all_texts):
+        zh = translate_v2(text)
+        translations[text] = zh
+        print(f"   [{i+1}/{len(all_texts)}] {'✅' if zh != text else '⏭'} {text[:40]}...")
+        time.sleep(0.5)
+
+    print("📝 生成中文摘要...")
+    digest = build_digest(feed, translations)
     links = build_links_summary(feed)
     print(f"   → 摘要 {len(digest)} 字")
 
@@ -195,7 +280,6 @@ def main():
     token = get_tenant_token()
 
     print("📤 发送飞书消息...")
-    # 正文（飞书有 4000 字限制）
     chunk_size = 3800
     chunks = [digest[i:i+chunk_size] for i in range(0, len(digest), chunk_size)]
     for i, chunk in enumerate(chunks):
@@ -203,12 +287,10 @@ def main():
         result = send_feishu_text(token, FEISHU_USER_OPEN_ID, part)
         print(f"   → 第 {i+1} 部分: code={result.get('code')}")
 
-    # 链接汇总（单独发）
     send_feishu_text(token, FEISHU_USER_OPEN_ID, links)
     print("   → 链接汇总已发送")
 
     print("✅ 完成！")
-
 
 if __name__ == "__main__":
     try:
