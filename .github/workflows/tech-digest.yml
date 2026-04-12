@@ -26,13 +26,11 @@ jobs:
         run: |
           pip install requests -q
           python3 << 'SCRIPT'
-          import json, subprocess, urllib.request
+          import json, urllib.request
 
-          # 读取数据
           gh = json.load(open("github-trending.json"))
           hn = json.load(open("hn-raw.json"))
 
-          # 过滤 GitHub spam
           spam_kw = ["fake", "flash", "hotmail", "usdt", "btc", "eth/", "trump", "scam"]
           repos = []
           for item in gh.get("items", [])[:10]:
@@ -47,7 +45,6 @@ jobs:
                       "url": item["html_url"]
                   })
 
-          # 过滤 HN
           stories = []
           for hit in hn.get("hits", [])[:30]:
               title = hit.get("title", "")
@@ -66,7 +63,6 @@ jobs:
           from datetime import datetime
           date = datetime.now().strftime("%Y-%m-%d")
 
-          # 生成 markdown
           lines = [f"🗞️ 科技资讯日报 · {date}", "", "⭐ **GitHub Trending**", ""]
           for r in repos[:7]:
               lang = f"`{r['language']}`" if r['language'] else ""
@@ -87,21 +83,25 @@ jobs:
           text = "\n".join(lines)
 
           # 获取飞书 token
-          import json as j
+          app_id = "${{ secrets.FEISHU_APP_ID }}"
+          app_secret = "${{ secrets.FEISHU_APP_SECRET }}"
           req = urllib.request.Request(
               "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
-              data=j.dumps({"app_id": "${{ secrets.FEISHU_APP_ID }}",
-                           "app_secret": "${{ secrets.FEISHU_APP_SECRET }}"}).encode(),
+              data=json.dumps({"app_id": app_id, "app_secret": app_secret}).encode(),
               headers={"Content-Type": "application/json"},
               method="POST"
           )
           with urllib.request.urlopen(req, timeout=10) as r:
-              token = j.loads(r.read().decode()).get("tenant_access_token", "")
+              token_data = json.loads(r.read().decode())
+          token = token_data.get("tenant_access_token", "")
+          if not token:
+              print("❌ 获取 token 失败:", token_data)
+              exit(1)
 
-          # 发飞书消息
-          from urllib.parse import quote
+          # 发飞书消息 - 用 open_id 发送
+          open_id = "${{ secrets.FEISHU_USER_OPEN_ID }}"
           msg = {
-              "receive_id": "${{ secrets.FEISHU_CHAT_ID }}",
+              "receive_id": open_id,
               "msg_type": "post",
               "content": json.dumps({
                   "post": {
@@ -113,16 +113,17 @@ jobs:
               })
           }
           req2 = urllib.request.Request(
-              f"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
-              data=j.dumps(msg).encode(),
+              "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id",
+              data=json.dumps(msg).encode(),
               headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
               method="POST"
           )
           with urllib.request.urlopen(req2, timeout=10) as r2:
-              result = j.loads(r2.read().decode())
+              result = json.loads(r2.read().decode())
           code = result.get("code")
           if code == 0:
               print(f"✅ 飞书推送成功! GH {len(repos)} | HN {len(stories)}")
           else:
               print(f"❌ 飞书推送失败: {code} {result.get('msg','')}")
+              print("详情:", json.dumps(result, ensure_ascii=False))
           SCRIPT
