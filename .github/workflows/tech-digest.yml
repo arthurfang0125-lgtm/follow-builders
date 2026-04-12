@@ -82,9 +82,10 @@ jobs:
 
           text = "\n".join(lines)
 
-          # 获取飞书 token
           app_id = "${{ secrets.FEISHU_APP_ID }}"
           app_secret = "${{ secrets.FEISHU_APP_SECRET }}"
+
+          # 获取 token
           req = urllib.request.Request(
               "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
               data=json.dumps({"app_id": app_id, "app_secret": app_secret}).encode(),
@@ -98,19 +99,11 @@ jobs:
               print("❌ 获取 token 失败:", token_data)
               exit(1)
 
-          # 发飞书消息 - 用 open_id 发送
           open_id = "${{ secrets.FEISHU_USER_OPEN_ID }}"
           msg = {
               "receive_id": open_id,
-              "msg_type": "post",
-              "content": json.dumps({
-                  "post": {
-                      "zh_cn": {
-                          "title": "🗞️ 科技资讯日报 · " + date,
-                          "content": [[{"tag": "text", "text": text}]]
-                      }
-                  }
-              })
+              "msg_type": "text",
+              "content": json.dumps({"text": text})
           }
           req2 = urllib.request.Request(
               "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id",
@@ -125,5 +118,5 @@ jobs:
               print(f"✅ 飞书推送成功! GH {len(repos)} | HN {len(stories)}")
           else:
               print(f"❌ 飞书推送失败: {code} {result.get('msg','')}")
-              print("详情:", json.dumps(result, ensure_ascii=False))
+              exit(1)
           SCRIPT
