@@ -11,112 +11,221 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ── 数据源抓取 ──
       - name: Fetch GitHub Trending
         run: |
-          curl -s "https://api.github.com/search/repositories?q=created:>2025-01-01+language:python+stars:>100&sort=stars&order=desc&per_page=10" \
-            -H "Accept: application/vnd.github.v3+json" \
-            -H "User-Agent: Mozilla/5.0" > github-trending.json
+          curl -s --max-time 15 "https://api.github.com/search/repositories?q=created:>2025-01-01+language:python+stars:>100&sort=stars&order=desc&per_page=12" \
+            -H "Accept: application/vnd.github.v3+json" -H "User-Agent: Mozilla/5.0" > github-trending.json
+          echo "GH_STATUS=$?" >> $GITHUB_ENV
 
-      - name: Fetch HN
+      - name: Fetch Hacker News
         run: |
-          curl -s "https://hn.algolia.com/api/v1/search_by_date?tags=front_page&hitsPerPage=30" \
+          curl -s --max-time 15 "https://hn.algolia.com/api/v1/search_by_date?tags=front_page&hitsPerPage=40" \
             -H "User-Agent: Mozilla/5.0 (compatible)" > hn-raw.json
+          echo "HN_STATUS=$?" >> $GITHUB_ENV
 
-      - name: Build and Push to Feishu
+      - name: Fetch RSS Feeds
         run: |
-          pip install requests -q
+          # Hacker News RSS
+          curl -s --max-time 12 -L -A "Mozilla/5.0" "https://hnrss.org/frontpage" > rss-hn.xml
+          # Product Hunt
+          curl -s --max-time 12 -L -A "Mozilla/5.0" "https://www.producthunt.com/feed" > rss-ph.xml
+          # GitHub Blog
+          curl -s --max-time 12 -L -A "Mozilla/5.0" "https://github.blog/feed/" > rss-ghblog.xml
+          # Dev.to
+          curl -s --max-time 12 -L -A "Mozilla/5.0" "https://dev.to/feed" > rss-devto.xml
+          # Smashing Magazine
+          curl -s --max-time 12 -L -A "Mozilla/5.0" "https://www.smashingmagazine.com/feed/" > rss-smash.xml
+          # Lobsters
+          curl -s --max-time 12 -L -A "Mozilla/5.0" "https://lobste.rs/rss" > rss-lobsters.xml
+          echo "RSS_FETCH=done" >> $GITHUB_ENV
+
+      # ── Python 处理 + 飞书推送 ──
+      - name: Build Digest & Push Feishu
+        run: |
+          pip install requests feedparser -q
           python3 << 'SCRIPT'
-          import json, urllib.request
-
-          gh = json.load(open("github-trending.json"))
-          hn = json.load(open("hn-raw.json"))
-
-          spam_kw = ["fake", "flash", "hotmail", "usdt", "btc", "eth/", "trump", "scam"]
-          repos = []
-          for item in gh.get("items", [])[:10]:
-              name = item.get("full_name", "").lower()
-              desc = item.get("description") or ""
-              if not any(k in name for k in spam_kw) and not any(k in desc.lower() for k in spam_kw):
+          import json, re, urllib.request
+          from datetime import datetime
+          
+          # ─── GitHub Trending ───
+          try:
+              gh = json.load(open("github-trending.json"))
+              spam = ["fake","flash","hotmail","usdt","btc","eth/","trump","scam","casino"]
+              repos = []
+              for item in gh.get("items", [])[:12]:
+                  name = item.get("full_name","").lower()
+                  desc = (item.get("description") or "").lower()
+                  if any(k in name or k in desc for k in spam): continue
                   repos.append({
                       "name": item["full_name"],
-                      "description": desc,
+                      "desc": (item.get("description") or "")[:70],
                       "stars": item.get("stargazers_count", 0),
-                      "language": item.get("language") or "",
+                      "lang": item.get("language") or "",
                       "url": item["html_url"]
                   })
-
-          stories = []
-          for hit in hn.get("hits", [])[:30]:
-              title = hit.get("title", "")
-              url = hit.get("url", "")
-              if "Is Hiring" in title or not url: continue
-              if hit.get("author","").startswith("_"): continue
-              stories.append({
-                  "title": title, "url": url,
-                  "points": hit.get("points", 0),
-                  "comments": hit.get("num_comments", 0),
-                  "author": hit.get("author", "")
-              })
-          stories.sort(key=lambda x: x["points"], reverse=True)
-          starred, top = stories[:5], stories[:10]
-
-          from datetime import datetime
+          except Exception as e:
+              print(f"GH error: {e}"); repos = []
+          print(f"GH repos: {len(repos)}")
+          
+          # ─── Hacker News ───
+          try:
+              hn = json.load(open("hn-raw.json"))
+              stories = []
+              for hit in hn.get("hits", [])[:40]:
+                  t, url = hit.get("title",""), hit.get("url","")
+                  author = hit.get("author","")
+                  if not url or "Is Hiring" in t or author.startswith("_"): continue
+                  stories.append({
+                      "title": t, "url": url,
+                      "pts": hit.get("points",0),
+                      "cmts": hit.get("num_comments",0),
+                      "author": author
+                  })
+              stories.sort(key=lambda x: x["pts"], reverse=True)
+              hn_star = stories[:5]
+              hn_top = stories[:10]
+          except Exception as e:
+              print(f"HN error: {e}"); hn_star, hn_top = [], []
+          print(f"HN stories: {len(stories)}")
+          
+          # ─── RSS Feeds ───
+          import xml.etree.ElementTree as ET
+          
+          RSS_SOURCES = [
+              ("rss-hn.xml",    "Hacker News RSS",    4),
+              ("rss-ph.xml",    "Product Hunt",       5),
+              ("rss-ghblog.xml","GitHub Blog",         3),
+              ("rss-devto.xml", "Dev.to",              4),
+              ("rss-smash.xml", "Smashing Magazine",  3),
+              ("rss-lobsters.xml","Lobsters",          4),
+          ]
+          
+          # AI/科技关键词
+          AI_KW = ["ai","llm","gpt","claude","gemini","agent","rag","rag","model",
+                    "python","github","open source","cloud","devops","kubernetes",
+                    "docker","api","sdk","startup","tech","product","build"]
+          
+          def parse_rss(path, src, limit):
+              items = []
+              try:
+                  tree = ET.parse(path)
+                  root = tree.getroot()
+                  ns = {"":""}
+                  # RSS 2.0
+                  for item in root.findall(".//item")[:limit*2]:
+                      t = (item.findtext("title") or "").strip()
+                      l = (item.findtext("link") or "").strip()
+                      s = (item.findtext("description") or "").strip()
+                      if not t or not l: continue
+                      text = (t+" "+s).lower()
+                      if not any(k in text for k in AI_KW): continue
+                      items.append({"title":t,"url":l,"source":src})
+                      if len(items) >= limit: break
+                  # Atom
+                  if not items:
+                      for entry in root.findall(".//entry")[:limit*2]:
+                          t = (entry.findtext("title") or "").strip()
+                          l = (entry.findtext("link") or "").strip()
+                          s = (entry.findtext("summary") or entry.findtext("content") or "").strip()
+                          if not t or not l: continue
+                          text = (t+" "+s).lower()
+                          if not any(k in text for k in AI_KW): continue
+                          items.append({"title":t,"url":l,"source":src})
+                          if len(items) >= limit: break
+              except Exception as e:
+                  print(f"RSS {src} error: {e}")
+              return items
+          
+          rss_all = []
+          for path, src, lim in RSS_SOURCES:
+              rss_all.extend(parse_rss(path, src, lim))
+          print(f"RSS items: {len(rss_all)}")
+          
+          # ─── 组装日报 ───
           date = datetime.now().strftime("%Y-%m-%d")
-
-          lines = [f"🗞️ 科技资讯日报 · {date}", "", "⭐ **GitHub Trending**", ""]
-          for r in repos[:7]:
-              lang = f"`{r['language']}`" if r['language'] else ""
-              lines.append(f"- **{r['name']}** {lang} ({r['stars']:,}⭐)")
-              if r['description']:
-                  lines.append(f"  > {r['description'][:60]}")
-
-          lines += ["", "🔥 **HN 精选**", ""]
-          for s in starred:
-              lines.append(f"- **[{s['title']}]({s['url']})** ({s['points']}pts · {s['comments']}💬)")
-
-          lines += ["", "📰 **HN Top 10**", ""]
-          for i, s in enumerate(top[:10], 1):
-              lines.append(f"{i}. [{s['title']}]({s['url']}) — {s['points']}pts")
-
-          lines += ["", "---", "🤖 GitHub Actions · 每日 11:00 & 17:00 北京时间推送"]
-
+          lines = []
+          lines.append(f"🗞️ 科技资讯日报 · {date}")
+          lines.append("")
+          
+          # GitHub Trending
+          if repos:
+              lines.append("⭐ **GitHub Trending**")
+              lines.append("")
+              for r in repos[:7]:
+                  lang = f"`{r['lang']}`" if r['lang'] else ""
+                  lines.append(f"- **{r['name']}** {lang} ({r['stars']:,}⭐)")
+                  if r['desc']: lines.append(f"  > {r['desc']}")
+              lines.append("")
+          
+          # HN 精选
+          if hn_star:
+              lines.append("🔥 **Hacker News 精选**")
+              lines.append("")
+              for s in hn_star:
+                  lines.append(f"- **[{s['title']}]({s['url']})** ({s['pts']}pts · {s['cmts']}💬)")
+              lines.append("")
+          
+          # RSS
+          if rss_all:
+              lines.append("📡 **精选 RSS**")
+              lines.append("")
+              for item in rss_all[:15]:
+                  lines.append(f"- [{item['title']}]({item['url']}) [{item['source']}]")
+              lines.append("")
+          
+          # HN Top 10
+          if hn_top:
+              lines.append("📰 **HN Top 10**")
+              lines.append("")
+              for i, s in enumerate(hn_top[:10], 1):
+                  lines.append(f"{i}. [{s['title']}]({s['url']}) — {s['pts']}pts")
+              lines.append("")
+          
+          lines.append("---")
+          lines.append("🤖 GitHub Actions · 每日 11:00 & 17:00 北京时间推送")
+          
           text = "\n".join(lines)
-
+          print(f"日报总字数: {len(text)} | 行数: {len(lines)}")
+          
+          # ─── 飞书推送 ───
           app_id = "${{ secrets.FEISHU_APP_ID }}"
           app_secret = "${{ secrets.FEISHU_APP_SECRET }}"
-
-          # 获取 token
+          
           req = urllib.request.Request(
               "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
               data=json.dumps({"app_id": app_id, "app_secret": app_secret}).encode(),
-              headers={"Content-Type": "application/json"},
-              method="POST"
+              headers={"Content-Type": "application/json"}, method="POST"
           )
           with urllib.request.urlopen(req, timeout=10) as r:
-              token_data = json.loads(r.read().decode())
-          token = token_data.get("tenant_access_token", "")
-          if not token:
-              print("❌ 获取 token 失败:", token_data)
-              exit(1)
-
+              token = json.loads(r.read().decode()).get("tenant_access_token","")
+          if not token: print("❌ token 获取失败"); exit(1)
+          
+          # 分段发送（飞书单条消息有长度限制）
           open_id = "${{ secrets.FEISHU_USER_OPEN_ID }}"
-          msg = {
-              "receive_id": open_id,
-              "msg_type": "text",
-              "content": json.dumps({"text": text})
-          }
-          req2 = urllib.request.Request(
-              "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id",
-              data=json.dumps(msg).encode(),
-              headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-              method="POST"
-          )
-          with urllib.request.urlopen(req2, timeout=10) as r2:
-              result = json.loads(r2.read().decode())
-          code = result.get("code")
-          if code == 0:
-              print(f"✅ 飞书推送成功! GH {len(repos)} | HN {len(stories)}")
-          else:
-              print(f"❌ 飞书推送失败: {code} {result.get('msg','')}")
-              exit(1)
+          chunks = []
+          chunk = ""
+          for line in lines:
+              test = chunk + "\n" + line if chunk else line
+              if len(test) > 3800:
+                  chunks.append(chunk)
+                  chunk = line
+              else:
+                  chunk = test
+          if chunk: chunks.append(chunk)
+          
+          for i, c in enumerate(chunks, 1):
+              msg = {"receive_id": open_id, "msg_type": "text", "content": json.dumps({"text": c})}
+              req2 = urllib.request.Request(
+                  "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id",
+                  data=json.dumps(msg).encode(),
+                  headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, method="POST"
+              )
+              with urllib.request.urlopen(req2, timeout=10) as r2:
+                  res = json.loads(r2.read().decode())
+              code = res.get("code", -1)
+              print(f"  片段{i}/{len(chunks)}: code={code}")
+              if code != 0: print(f"  ❌ {res.get('msg','')}")
+          
+          print(f"✅ 完成: GH={len(repos)} HN={len(stories)} RSS={len(rss_all)}")
           SCRIPT
