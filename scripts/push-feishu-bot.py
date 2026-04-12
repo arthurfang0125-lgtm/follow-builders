@@ -196,12 +196,12 @@ def build_digest(feed, translations):
             zh_text = translations.get(clean_text, translations.get(text, clean_text))
 
             # 去掉了 → note 价值判断行
-            entry = f"- **{name}**（{role}）：{zh_text}"
+            entry = f"- {name}（{role}）：{zh_text}"
 
             if is_top and len(top_items) < 3:
-                top_items.append(entry)
+                top_items.append("▶ " + entry)
             elif len(view_items) < 8:
-                view_items.append(entry)
+                view_items.append("💡 " + entry)
 
     lines = [
         f"🌅 AI Builder 每日晨报｜{today}",
