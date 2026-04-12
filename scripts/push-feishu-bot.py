@@ -109,7 +109,8 @@ NON_AI_SIGNALS = [
     "link in bio", "subscribe", "check out my",
     # Swyx 生活类关键词
     "latent space", "swyx", "solo song", "cabaret", "seating",
-    "fumbled", "lyrics", "cabaret", "solo song", "singing", "performer", "seating", "v limited", song for the first time,
+    "fumbled", "lyrics", "singing", "performer", "v limited",
+    "song for the first time",
 ]
 
 
