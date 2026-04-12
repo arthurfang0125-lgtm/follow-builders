@@ -72,7 +72,7 @@ AI_SOFT_SIGNALS = [
 NON_AI_SIGNALS = [
     # 纯生活/娱乐/个人
     "broadway", "theater", "theatre", "musical", "百老汇",
-    "flight ", "fly to", "flew to", "travel", "hotel",
+    "flight ", "fly to", "flew to", "fly back", "travel", "hotel",
     "dinner", "lunch", "breakfast", "coffee break",
     "good morning", "good night", "gm ", "晚安", "早安",
     "weekend", "holiday", "vacation", "beach", "sunset",
@@ -90,7 +90,30 @@ NON_AI_SIGNALS = [
     "retweet", "shared", "via ",
     # 纯 promo
     "link in bio", "subscribe", "check out my",
+    # Swyx 生活类关键词
+    "latent space", "swyx", "solo song", "cabaret", "seating",
+    "fumbled", "lyrics", "song for the first time",
 ]
+
+
+# ===== 翻译精炼函数 =====
+# 去掉翻译后文字中的语气词、开头白话，直接出观点
+FILLER_PATTERNS = [
+    r"^(so |too |yeah |yes |well |look,? )",
+    r"^(honestly|actually|basically|literally|simply|just )",
+    r"^(the thing is|what i realize|what i learned|here'?s (the )?(thing|take):?\s*)",
+    r"(哈哈|呵呵|嘿嘿|嘻嘻|～|…{2,})$",  # 尾部语气
+]
+
+
+def strip_filler(text):
+    """去掉推文开头的语气词/白话，直接出核心观点。"""
+    t = text.strip()
+    for pat in FILLER_PATTERNS:
+        t = re.sub(pat, "", t, flags=re.IGNORECASE).strip()
+    # 去掉开头括号说明（"1)" "2)" 等列表格式，保留内容）
+    t = re.sub(r"^\d+\)\s*", "", t)
+    return t
 
 
 def is_ai_relevant(text):
@@ -335,6 +358,8 @@ def build_digest(feed, translations):
                 continue
 
             zh_text = translations.get(clean_text, translations.get(text, clean_text))
+            # 精炼：去掉语气词/白话，直接出观点
+            zh_text = strip_filler(zh_text)
             entry = f"- {name}（{role}）：{zh_text}"
 
             # 最值得看：高质量（>=80分）或高互动（likes>=20 or rt>=5）
