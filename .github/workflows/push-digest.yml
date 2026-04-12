@@ -1,0 +1,35 @@
+name: AI Builder 中文摘要 → 飞书 Bot
+
+on:
+  schedule:
+    # 每天 00:05 UTC = 08:05 北京时间（raw feed 在 06:00 UTC 生成）
+    - cron: '5 0 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (skip Feishu push)'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Fetch raw feed
+        run: |
+          echo "Fetching feed-x.json from upstream..."
+          curl -s "https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-x.json" -o feed-x.json
+          echo "Done. File size: $(wc -c < feed-x.json) bytes"
+
+      - name: Generate digest & push to Feishu
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_USER_OPEN_ID: ${{ secrets.FEISHU_USER_OPEN_ID }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: python3 scripts/push-feishu-bot.py
