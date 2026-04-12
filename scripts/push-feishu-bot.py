@@ -60,14 +60,31 @@ AI_CORE_SIGNALS = [
     "scaling law", "emergent", "reasoning model",
     "cursor", "copilot", "replit", "perplexity",
 ]
-# 宽松 AI 信号：需要配合内容判断
-AI_SOFT_SIGNALS = [
-    "model", "launch", "product", "feature",
-    "startup", "vc ", "founder", "saas", "ARR",
-    "engineer", "platform", "api", "sdk", "developer",
-    "software", "code", "programming", "data",
-    "latency", "performance", "open source",
-    "mistake", "lesson", "insight", "opinion", "analysis",
+# 宽松 AI 信号：必须含洞察关键词才能进摘要
+# 重新设计——只有真正有观点/洞察的才收录
+AI_INSIGHT_SIGNALS = [
+    # 核心洞察类
+    "mistake", "wrong", "lie ", "truth", "surprising",
+    "actually", "realize", "lesson", "learned",
+    "surprised", "unexpected", "counterintuitive",
+    # 趋势/格局类
+    "trend", "prediction", "forecast", "will happen",
+    "the future of", "next wave", "paradigm",
+    # 深度分析/观点
+    "insight", "analysis", "opinion", "perspective",
+    "the key is", "the problem is", "the reason is",
+    "here's what", "here is what",
+    # 具体洞察描述
+    "over-rely", "underestimate", "overestimate",
+    "fundamentally", "architecture", "unlocks",
+    "solved problem", "the real", "the actual",
+    # 产品/系统设计洞察
+    "ux ", "user experience", "developer experience",
+    "design taste",
+    # 技术系统类（Agent/Harness 生态）
+    "plugin", "harness", "agent system", "agentic",
+    # 协作/工作流洞察
+    "collaborat", "workflow", "handoff",
 ]
 NON_AI_SIGNALS = [
     # 纯生活/娱乐/个人
@@ -92,7 +109,7 @@ NON_AI_SIGNALS = [
     "link in bio", "subscribe", "check out my",
     # Swyx 生活类关键词
     "latent space", "swyx", "solo song", "cabaret", "seating",
-    "fumbled", "lyrics", "song for the first time",
+    "fumbled", "lyrics", "cabaret", "solo song", "singing", "performer", "seating", "v limited", song for the first time,
 ]
 
 
@@ -119,22 +136,22 @@ def strip_filler(text):
 def is_ai_relevant(text):
     """
     判断推文是否跟 AI/科技/行业认知相关。
-    逻辑：
+    逻辑（保守，宁少勿滥）：
     1. 有严格 AI 信号词（AI_CORE_SIGNALS）→ 相关
-    2. 有非 AI 信号词（NON_AI_SIGNALS）且没有严格 AI 信号 → 不相关
-    3. 有宽松 AI 信号词（AI_SOFT_SIGNALS）且无 NON_AI 信号 → 相关
-    4. 其他 → 不相关（保守处理，宁可少收，不要口水文）
+    2. 有非 AI 信号词（NON_AI_SIGNALS）且无严格 AI 信号 → 不相关
+    3. 有洞察关键词（AI_INSIGHT_SIGNALS）→ 相关
+    4. 其他 → 不相关
     """
     t_lower = text.lower()
     has_core = any(sig in t_lower for sig in AI_CORE_SIGNALS)
-    has_soft = any(sig in t_lower for sig in AI_SOFT_SIGNALS)
+    has_insight = any(sig in t_lower for sig in AI_INSIGHT_SIGNALS)
     has_non_ai = any(sig in t_lower for sig in NON_AI_SIGNALS)
 
     if has_core:
         return True
     if has_non_ai and not has_core:
         return False
-    if has_soft and not has_non_ai:
+    if has_insight:
         return True
     return False
 
