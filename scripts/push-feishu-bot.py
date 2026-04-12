@@ -3,7 +3,7 @@
 AI Builder 每日晨报 · 飞书 Bot 推送脚本
 GitHub Actions 调用：读取 feed-x.json → 翻译 + 生成中文摘要 → 发飞书 Bot 消息
 """
-import json, urllib.request, urllib.error, sys, time
+import json, urllib.request, re, urllib.error, sys, time
 from datetime import datetime
 
 # ===== 配置 =====
@@ -191,8 +191,9 @@ def build_digest(feed, translations):
 
             is_top = (likes >= 20 or rt >= 5) and len(text) >= 80
 
-            # 翻译
-            zh_text = translations.get(text, text)
+            # 去链接 + 翻译
+            clean_text = re.sub(r"https?://\S+", "", text).strip()
+            zh_text = translations.get(clean_text, translations.get(text, clean_text))
 
             # 去掉了 → note 价值判断行
             entry = f"- **{name}**（{role}）：{zh_text}"
@@ -256,7 +257,8 @@ def main():
     ]
     for b in builders_data:
         for tw in b.get("tweets", []):
-            t = tw.get("text", "")
+            t_raw = tw.get("text", "")
+            t = re.sub(r"https?://\S+", "", t_raw).strip()
             if len(t) >= 40 and not any(kw.lower() in t.lower() for kw in BULLSHIT_KEYWORDS):
                 if t not in text_to_builder:
                     text_to_builder[t] = True
