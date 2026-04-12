@@ -48,6 +48,74 @@ QUALITY_SIGNALS = [
     "introducing", "announcing", "launching",
 ]
 
+# ===== AI 相关性判断（硬门槛）=====
+# 严格 AI 信号：有这些词直接算 AI 相关
+AI_CORE_SIGNALS = [
+    "ai ", " llm", "gpt", "gemini", "claude", "mistral", "deepseek",
+    "chatgpt", "openai", "anthropic", "deepmind", "meta ai",
+    "machine learning", "neural", "benchmark", "training data",
+    "inference", "fine-tun", "rag", "embedding", "vector db",
+    "agent", "agents", "agentic", "autonomous ai",
+    "prompt", "prompting", "few-shot", "zero-shot",
+    "scaling law", "emergent", "reasoning model",
+    "cursor", "copilot", "replit", "perplexity",
+]
+# 宽松 AI 信号：需要配合内容判断
+AI_SOFT_SIGNALS = [
+    "model", "launch", "product", "feature",
+    "startup", "vc ", "founder", "saas", "ARR",
+    "engineer", "platform", "api", "sdk", "developer",
+    "software", "code", "programming", "data",
+    "latency", "performance", "open source",
+    "mistake", "lesson", "insight", "opinion", "analysis",
+]
+NON_AI_SIGNALS = [
+    # 纯生活/娱乐/个人
+    "broadway", "theater", "theatre", "musical", "百老汇",
+    "flight ", "fly to", "flew to", "travel", "hotel",
+    "dinner", "lunch", "breakfast", "coffee break",
+    "good morning", "good night", "gm ", "晚安", "早安",
+    "weekend", "holiday", "vacation", "beach", "sunset",
+    "family", "kid", "wife", "husband", "baby", "dog", "cat",
+    "gym", "running", "yoga", "fitness",
+    "movie", "film", "book", "music", "concert", "game",
+    "restaurant", "pub ", "cafe", "pizza",
+    "birthday", "anniversary", "celebrat", "party",
+    # 纯社交/情绪
+    "haha", "lol", "lmao", "笑死",
+    "love this", "love it", "so cool", "so funny",
+    "proud of", "congrats", "congratulations",
+    "thank you", "thanks for",
+    # 纯转发
+    "retweet", "shared", "via ",
+    # 纯 promo
+    "link in bio", "subscribe", "check out my",
+]
+
+
+def is_ai_relevant(text):
+    """
+    判断推文是否跟 AI/科技/行业认知相关。
+    逻辑：
+    1. 有严格 AI 信号词（AI_CORE_SIGNALS）→ 相关
+    2. 有非 AI 信号词（NON_AI_SIGNALS）且没有严格 AI 信号 → 不相关
+    3. 有宽松 AI 信号词（AI_SOFT_SIGNALS）且无 NON_AI 信号 → 相关
+    4. 其他 → 不相关（保守处理，宁可少收，不要口水文）
+    """
+    t_lower = text.lower()
+    has_core = any(sig in t_lower for sig in AI_CORE_SIGNALS)
+    has_soft = any(sig in t_lower for sig in AI_SOFT_SIGNALS)
+    has_non_ai = any(sig in t_lower for sig in NON_AI_SIGNALS)
+
+    if has_core:
+        return True
+    if has_non_ai and not has_core:
+        return False
+    if has_soft and not has_non_ai:
+        return True
+    return False
+
+
 LOW_SIGNALS = [
     # 纯情绪
     "haha", "lol", "lmao", "笑死", "笑到", "太牛", "太强", "绝了",
@@ -107,13 +175,13 @@ def score_quality(text):
 
 
 def is_substantive(text):
-    """判断是否值得加入摘要（有实质内容，不只是日常闲聊）。"""
-    return score_quality(text) >= 60
+    """判断是否值得加入摘要：有实质内容 + 与 AI/科技/行业相关。"""
+    return is_ai_relevant(text) and score_quality(text) >= 60
 
 
 def is_top_quality(text):
-    """判断是否值得进入「最值得看」板块（最高质量）。"""
-    return score_quality(text) >= 80
+    """判断是否值得进入「最值得看」板块（高质量 + AI 相关）。"""
+    return is_ai_relevant(text) and score_quality(text) >= 80
 
 
 # ===== 工具函数 =====
@@ -318,18 +386,22 @@ def main():
     builders_data = feed.get("x", [])
     print(f"   → {len(builders_data)} 位 Builders")
 
-    # 收集所有待翻译的推文（质量评分 >= 60 才收录）
-    print("🌏 收集推文文本（质量评分 >= 60）...")
+    # 收集所有待翻译的推文（必须：AI相关 + 质量评分 >= 60）
+    print("🌏 收集推文文本（AI相关 + 质量评分 >= 60）...")
     all_texts = []
     text_to_builder = {}
+    skipped = []
     for b in builders_data:
         for tw in b.get("tweets", []):
             t_raw = tw.get("text", "")
             t = re.sub(r"https?://\S+", "", t_raw).strip()
-            # 质量评分过滤
+            if not is_ai_relevant(t):
+                skipped.append(t[:50])
+                continue
             if is_substantive(t) and t not in text_to_builder:
                 text_to_builder[t] = True
                 all_texts.append(t)
+    print(f"   → {len(all_texts)} 条通过，{len(skipped)} 条因非AI相关内容被过滤")
     print(f"   → {len(all_texts)} 条推文待翻译")
 
     print("✍️  翻译推文...")
