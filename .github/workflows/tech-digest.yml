@@ -6,192 +6,217 @@ on:
   workflow_dispatch:
 
 jobs:
-  fetch-and-push:
+  digest:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # ── 数据源抓取 ──
+      # ══════════════════════════════════════
+      # 数据源抓取
+      # ══════════════════════════════════════
+
       - name: Fetch GitHub Trending
         run: |
-          curl -s --max-time 15 "https://api.github.com/search/repositories?q=created:>2025-01-01+language:python+stars:>100&sort=stars&order=desc&per_page=12" \
-            -H "Accept: application/vnd.github.v3+json" -H "User-Agent: Mozilla/5.0" > github-trending.json
-          echo "GH_STATUS=$?" >> $GITHUB_ENV
+          curl -s --max-time 15 \
+            "https://api.github.com/search/repositories?q=created:>2025-01-01+language:python+stars:>100&sort=stars&order=desc&per_page=12" \
+            -H "Accept: application/vnd.github.v3+json" > github-trending.json
 
-      - name: Fetch Hacker News
+      - name: Fetch Hacker News (Algolia)
         run: |
-          curl -s --max-time 15 "https://hn.algolia.com/api/v1/search_by_date?tags=front_page&hitsPerPage=40" \
-            -H "User-Agent: Mozilla/5.0 (compatible)" > hn-raw.json
-          echo "HN_STATUS=$?" >> $GITHUB_ENV
+          curl -s --max-time 15 \
+            "https://hn.algolia.com/api/v1/search_by_date?tags=front_page&hitsPerPage=40" > hn-algolia.json
+
+      - name: Fetch HackerNews Best RSS
+        run: |
+          curl -s --max-time 12 -L -A "Mozilla/5.0" "https://hnrss.org/best" > rss-hn-best.xml
+
+      - name: Fetch Reddit RSS Feeds
+        run: |
+          for sr in artificial ChatGPT LocalLLaMA ArtificialInteligence MachineLearning                      technology programming opensource startups Entrepreneur gpt                      gadgets software computerscience dataisbeautiful; do
+            curl -s --max-time 10 -L "https://www.reddit.com/r/${sr}/hot.rss?limit=15" \
+              -A "Mozilla/5.0 (compatible)" > "rss-reddit-${sr}.xml"
+          done
+          echo "Reddit fetch done"
 
       - name: Fetch RSS Feeds
         run: |
-          # Hacker News RSS
           curl -s --max-time 12 -L -A "Mozilla/5.0" "https://hnrss.org/frontpage" > rss-hn.xml
-          # Product Hunt
           curl -s --max-time 12 -L -A "Mozilla/5.0" "https://www.producthunt.com/feed" > rss-ph.xml
-          # GitHub Blog
           curl -s --max-time 12 -L -A "Mozilla/5.0" "https://github.blog/feed/" > rss-ghblog.xml
-          # Dev.to
           curl -s --max-time 12 -L -A "Mozilla/5.0" "https://dev.to/feed" > rss-devto.xml
-          # Smashing Magazine
           curl -s --max-time 12 -L -A "Mozilla/5.0" "https://www.smashingmagazine.com/feed/" > rss-smash.xml
-          # Lobsters
           curl -s --max-time 12 -L -A "Mozilla/5.0" "https://lobste.rs/rss" > rss-lobsters.xml
-          echo "RSS_FETCH=done" >> $GITHUB_ENV
+          curl -s --max-time 12 -L -A "Mozilla/5.0" "https://techcrunch.com/feed/" > rss-tc.xml
+          curl -s --max-time 12 -L -A "Mozilla/5.0" "https://www.theverge.com/rss/index.xml" > rss-verge.xml
+          curl -s --max-time 12 -L -A "Mozilla/5.0" "https://hackernoon.com/feed" > rss-hnmoon.xml
+          curl -s --max-time 12 -L -A "Mozilla/5.0" "https://increment.com/feed.xml" > rss-inc.xml
+          echo "RSS feeds fetched"
 
-      # ── Python 处理 + 飞书推送 ──
-      - name: Build Digest & Push Feishu
+      # ══════════════════════════════════════
+      # Python 处理 + 飞书推送
+      # ══════════════════════════════════════
+      - name: Build digest & push Feishu
         run: |
-          pip install requests feedparser -q
+          pip install requests -q
           python3 << 'SCRIPT'
-          import json, re, urllib.request
+          import json, re, urllib.request, xml.etree.ElementTree as ET
           from datetime import datetime
-          
-          # ─── GitHub Trending ───
+
+          # ── 1. GitHub Trending ──────────────
           try:
               gh = json.load(open("github-trending.json"))
-              spam = ["fake","flash","hotmail","usdt","btc","eth/","trump","scam","casino"]
+              SPAM = ["fake","flash","hotmail","usdt","btc","eth/","trump","scam","casino","onlyfans"]
               repos = []
               for item in gh.get("items", [])[:12]:
-                  name = item.get("full_name","").lower()
-                  desc = (item.get("description") or "").lower()
-                  if any(k in name or k in desc for k in spam): continue
+                  n = item.get("full_name","").lower()
+                  d = (item.get("description") or "").lower()
+                  if any(k in n or k in d for k in SPAM): continue
                   repos.append({
-                      "name": item["full_name"],
-                      "desc": (item.get("description") or "")[:70],
-                      "stars": item.get("stargazers_count", 0),
-                      "lang": item.get("language") or "",
-                      "url": item["html_url"]
+                      "n": item["full_name"],
+                      "d": (item.get("description") or "")[:75],
+                      "s": item.get("stargazers_count",0),
+                      "l": item.get("language") or "",
+                      "u": item["html_url"]
                   })
           except Exception as e:
-              print(f"GH error: {e}"); repos = []
+              print(f"GH err: {e}"); repos = []
           print(f"GH repos: {len(repos)}")
-          
-          # ─── Hacker News ───
+
+          # ── 2. Hacker News Algolia ──────────
           try:
-              hn = json.load(open("hn-raw.json"))
+              hn = json.load(open("hn-algolia.json"))
               stories = []
               for hit in hn.get("hits", [])[:40]:
                   t, url = hit.get("title",""), hit.get("url","")
-                  author = hit.get("author","")
-                  if not url or "Is Hiring" in t or author.startswith("_"): continue
+                  if not url or "Is Hiring" in t: continue
                   stories.append({
-                      "title": t, "url": url,
-                      "pts": hit.get("points",0),
-                      "cmts": hit.get("num_comments",0),
-                      "author": author
+                      "t": t, "u": url,
+                      "p": hit.get("points",0),
+                      "c": hit.get("num_comments",0),
+                      "a": hit.get("author","")
                   })
-              stories.sort(key=lambda x: x["pts"], reverse=True)
+              stories.sort(key=lambda x: x["p"], reverse=True)
               hn_star = stories[:5]
-              hn_top = stories[:10]
+              hn_top  = stories[:10]
           except Exception as e:
-              print(f"HN error: {e}"); hn_star, hn_top = [], []
+              print(f"HN err: {e}"); hn_star, hn_top = [], []
           print(f"HN stories: {len(stories)}")
-          
-          # ─── RSS Feeds ───
-          import xml.etree.ElementTree as ET
-          
-          RSS_SOURCES = [
-              ("rss-hn.xml",    "Hacker News RSS",    4),
-              ("rss-ph.xml",    "Product Hunt",       5),
-              ("rss-ghblog.xml","GitHub Blog",         3),
-              ("rss-devto.xml", "Dev.to",              4),
-              ("rss-smash.xml", "Smashing Magazine",  3),
-              ("rss-lobsters.xml","Lobsters",          4),
-          ]
-          
-          # AI/科技关键词
-          AI_KW = ["ai","llm","gpt","claude","gemini","agent","rag","rag","model",
+
+          # ── 3. RSS 解析 ─────────────────────
+          AI_KW = ["ai","llm","gpt","claude","gemini","agent","rag","model",
                     "python","github","open source","cloud","devops","kubernetes",
-                    "docker","api","sdk","startup","tech","product","build"]
-          
-          def parse_rss(path, src, limit):
+                    "docker","api","sdk","startup","tech","product","build",
+                    "machine learning","deep learning","neural","nlp","cv",
+                    "automation","pipeline","deploy","infrastructure","vibe coding",
+                    "cursor","windsurf","bolt","devin","swe-agent","v0","replit"]
+
+          def parse_rss(path, src, limit=5):
+              if not path.exists(): return []
               items = []
               try:
                   tree = ET.parse(path)
                   root = tree.getroot()
-                  ns = {"":""}
-                  # RSS 2.0
-                  for item in root.findall(".//item")[:limit*2]:
-                      t = (item.findtext("title") or "").strip()
-                      l = (item.findtext("link") or "").strip()
-                      s = (item.findtext("description") or "").strip()
-                      if not t or not l: continue
+                  for el in (root.findall(".//item") or root.findall(".//entry"))[:limit*2]:
+                      t = (el.findtext("title") or "").strip()
+                      l = el.findtext("link") or ""
+                      if isinstance(l, list): l = str(l[0]) if l else ""
+                      s = (el.findtext("description") or el.findtext("summary") or el.findtext("content") or "").strip()
+                      if not t: continue
                       text = (t+" "+s).lower()
                       if not any(k in text for k in AI_KW): continue
-                      items.append({"title":t,"url":l,"source":src})
+                      items.append({"t": t[:90], "u": str(l), "s": src})
                       if len(items) >= limit: break
-                  # Atom
-                  if not items:
-                      for entry in root.findall(".//entry")[:limit*2]:
-                          t = (entry.findtext("title") or "").strip()
-                          l = (entry.findtext("link") or "").strip()
-                          s = (entry.findtext("summary") or entry.findtext("content") or "").strip()
-                          if not t or not l: continue
-                          text = (t+" "+s).lower()
-                          if not any(k in text for k in AI_KW): continue
-                          items.append({"title":t,"url":l,"source":src})
-                          if len(items) >= limit: break
               except Exception as e:
-                  print(f"RSS {src} error: {e}")
+                  print(f"RSS {src} err: {e}")
               return items
-          
-          rss_all = []
+
+          from pathlib import Path
+
+          RSS_SOURCES = [
+              ("rss-hn-best.xml",  "HN Best RSS",      4),
+              ("rss-reddit-artificial",          "r/artificial",          3),
+              ("rss-reddit-ChatGPT",             "r/ChatGPT",             3),
+              ("rss-reddit-LocalLLaMA",          "r/LocalLLaMA",         3),
+              ("rss-reddit-ArtificialInteligence","r/AI",                 3),
+              ("rss-reddit-MachineLearning",     "r/ML",                  3),
+              ("rss-reddit-technology",          "r/technology",          2),
+              ("rss-reddit-programming",         "r/programming",         2),
+              ("rss-reddit-opensource",          "r/opensource",          2),
+              ("rss-reddit-startups",            "r/startups",            2),
+              ("rss-reddit-gpt",                 "r/gpt",                 3),
+              ("rss-reddit-Entrepreneur",        "r/Entrepreneur",        2),
+              ("rss-reddit-gadgets",             "r/gadgets",             2),
+              ("rss-ph.xml",    "Product Hunt",       4),
+              ("rss-tc.xml",    "TechCrunch",          3),
+              ("rss-verge.xml", "The Verge",           3),
+              ("rss-hnmoon.xml","HackerNoon",          3),
+              ("rss-inc.xml",   "Increment",           3),
+              ("rss-ghblog.xml","GitHub Blog",         2),
+              ("rss-devto.xml", "Dev.to",              3),
+              ("rss-smash.xml", "Smashing Magazine",  2),
+              ("rss-lobsters.xml","Lobsters",          3),
+              ("rss-hn.xml",    "HN RSS",               3),
+          ]
+
+          rss_items = []
           for path, src, lim in RSS_SOURCES:
-              rss_all.extend(parse_rss(path, src, lim))
-          print(f"RSS items: {len(rss_all)}")
-          
-          # ─── 组装日报 ───
+              rss_items.extend(parse_rss(Path(path), src, lim))
+
+          # 去重（按 URL）
+          seen = set()
+          deduped = []
+          for item in rss_items:
+              url = item["u"]
+              if url and url not in seen:
+                  seen.add(url)
+                  deduped.append(item)
+          rss_items = deduped[:25]
+          print(f"RSS items (deduped): {len(rss_items)}")
+
+          # ── 4. 组装日报 ─────────────────────
           date = datetime.now().strftime("%Y-%m-%d")
           lines = []
           lines.append(f"🗞️ 科技资讯日报 · {date}")
           lines.append("")
-          
-          # GitHub Trending
+
           if repos:
               lines.append("⭐ **GitHub Trending**")
-              lines.append("")
               for r in repos[:7]:
-                  lang = f"`{r['lang']}`" if r['lang'] else ""
-                  lines.append(f"- **{r['name']}** {lang} ({r['stars']:,}⭐)")
-                  if r['desc']: lines.append(f"  > {r['desc']}")
+                  lang = f"`{r['l']}`" if r['l'] else ""
+                  lines.append(f"- **{r['n']}** {lang} ({r['s']:,}⭐)")
+                  if r['d']: lines.append(f"  > {r['d']}")
               lines.append("")
-          
-          # HN 精选
+
           if hn_star:
               lines.append("🔥 **Hacker News 精选**")
-              lines.append("")
               for s in hn_star:
-                  lines.append(f"- **[{s['title']}]({s['url']})** ({s['pts']}pts · {s['cmts']}💬)")
+                  lines.append(f"- **[{s['t']}]({s['u']})** ({s['p']}pts · {s['c']}💬)")
               lines.append("")
-          
-          # RSS
-          if rss_all:
-              lines.append("📡 **精选 RSS**")
+
+          if rss_items:
+              lines.append("📡 **Reddit / RSS 精选**")
+              for item in rss_items[:20]:
+                  lines.append(f"- [{item['t']}]({item['u']}) [{item['s']}]")
               lines.append("")
-              for item in rss_all[:15]:
-                  lines.append(f"- [{item['title']}]({item['url']}) [{item['source']}]")
-              lines.append("")
-          
-          # HN Top 10
+
           if hn_top:
               lines.append("📰 **HN Top 10**")
-              lines.append("")
               for i, s in enumerate(hn_top[:10], 1):
-                  lines.append(f"{i}. [{s['title']}]({s['url']}) — {s['pts']}pts")
+                  lines.append(f"{i}. [{s['t']}]({s['u']}) — {s['p']}pts")
               lines.append("")
-          
+
           lines.append("---")
           lines.append("🤖 GitHub Actions · 每日 11:00 & 17:00 北京时间推送")
-          
+
           text = "\n".join(lines)
-          print(f"日报总字数: {len(text)} | 行数: {len(lines)}")
-          
-          # ─── 飞书推送 ───
-          app_id = "${{ secrets.FEISHU_APP_ID }}"
+          print(f"日报: {len(text)}字 | {len(lines)}行")
+          print(f"  GH={len(repos)} HN={len(hn_star)} RSS={len(rss_items)}")
+
+          # ── 5. 飞书推送 ────────────────────
+          app_id    = "${{ secrets.FEISHU_APP_ID }}"
           app_secret = "${{ secrets.FEISHU_APP_SECRET }}"
-          
+          open_id   = "${{ secrets.FEISHU_USER_OPEN_ID }}"
+
           req = urllib.request.Request(
               "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
               data=json.dumps({"app_id": app_id, "app_secret": app_secret}).encode(),
@@ -199,21 +224,17 @@ jobs:
           )
           with urllib.request.urlopen(req, timeout=10) as r:
               token = json.loads(r.read().decode()).get("tenant_access_token","")
-          if not token: print("❌ token 获取失败"); exit(1)
-          
-          # 分段发送（飞书单条消息有长度限制）
-          open_id = "${{ secrets.FEISHU_USER_OPEN_ID }}"
-          chunks = []
-          chunk = ""
+          if not token: print("❌ token err"); exit(1)
+
+          # 分段发送
+          chunks, chunk = [], ""
           for line in lines:
-              test = chunk + "\n" + line if chunk else line
+              test = (chunk + "\n" + line) if chunk else line
               if len(test) > 3800:
-                  chunks.append(chunk)
-                  chunk = line
-              else:
-                  chunk = test
+                  chunks.append(chunk); chunk = line
+              else: chunk = test
           if chunk: chunks.append(chunk)
-          
+
           for i, c in enumerate(chunks, 1):
               msg = {"receive_id": open_id, "msg_type": "text", "content": json.dumps({"text": c})}
               req2 = urllib.request.Request(
@@ -226,6 +247,6 @@ jobs:
               code = res.get("code", -1)
               print(f"  片段{i}/{len(chunks)}: code={code}")
               if code != 0: print(f"  ❌ {res.get('msg','')}")
-          
-          print(f"✅ 完成: GH={len(repos)} HN={len(stories)} RSS={len(rss_all)}")
+
+          print("✅ 完成")
           SCRIPT
