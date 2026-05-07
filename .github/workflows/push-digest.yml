@@ -4,8 +4,6 @@ on:
   schedule:
     # 每天 02:00 UTC = 10:00 北京时间
     - cron: '0 2 * * *'
-    # 每天 09:00 UTC = 17:00 北京时间
-    - cron: '0 9 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
